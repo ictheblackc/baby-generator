@@ -1,6 +1,8 @@
 import os
 import shutil
 import uuid
+from pathlib import Path
+
 from openai import OpenAI
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Form
@@ -11,14 +13,19 @@ import numpy as np
 import face_recognition
 from deepface import DeepFace
 
+MEDIA_DIR = "media"
+os.makedirs(MEDIA_DIR, exist_ok=True)
+
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key)
 
 app = FastAPI()
 
+
 class Baby(BaseModel):
     gender: str
+
 
 @app.post("/generate-baby")
 async def generate_baby(
@@ -27,9 +34,14 @@ async def generate_baby(
     gender: str = Form(...)
 ):
     try:
+        # Create a developed directory for the user
+        session_id = uuid.uuid4().hex
+        user_dir = Path(MEDIA_DIR) / session_id
+        user_dir.mkdir(parents=True, exist_ok=True)
+
         # Save images to temporary paths
-        father_path = save_image(father_image, "father")
-        mother_path = save_image(mother_image, "mother")
+        father_path = save_uploaded_file(father_image, user_dir, "father")
+        mother_path = save_uploaded_file(mother_image, user_dir, "mother")
 
         # Extract face features
         father_desc = describe_face(father_path)
@@ -43,29 +55,31 @@ async def generate_baby(
         image_url = generate_child_image(prompt)
 
         # Clean up
-        os.remove(father_path)
-        os.remove(mother_path)
+        # os.remove(father_path)
+        # os.remove(mother_path)
 
         return {"image_url": image_url}
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-def save_image(image: UploadFile, label: str) -> str:
-    """Save the uploaded image and compress it to reduce memory usage."""
-    path = f"temp_{uuid.uuid4().hex}_{label}.jpg"
-    with open(path, "wb") as f:
-        shutil.copyfileobj(image.file, f)
-    # Compress the image
-    compress_image(path)
-    return path
 
-def compress_image(image_path: str):
+def save_uploaded_file(upload_file: UploadFile, user_dir: Path, name: str) -> str:
+    """Save uploaded file to a specific user's directory."""
+    file_path = user_dir / f"{name}.jpg"
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(upload_file.file, buffer)
+    compress_image(str(file_path))
+    return str(file_path)
+
+
+def compress_image(image_path: str) -> None:
     """Compress the image to reduce memory usage."""
     image = cv2.imread(image_path)
     if image is not None:
         compressed = cv2.resize(image, (512, 512), interpolation=cv2.INTER_AREA)
         cv2.imwrite(image_path, compressed, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
 
 def describe_face(image_path: str) -> dict:
     """Extract features using DeepFace and color/landmark analysis."""
@@ -108,6 +122,7 @@ def describe_face(image_path: str) -> dict:
         "landmarks": landmarks
     }
 
+
 def combine_face_descriptions(father: dict, mother: dict) -> dict:
     """Average relevant attributes of both parents."""
     return {
@@ -116,6 +131,7 @@ def combine_face_descriptions(father: dict, mother: dict) -> dict:
         "hair_color_rgb": tuple(((np.array(father["hair_color_rgb"]) + np.array(mother["hair_color_rgb"])) / 2).astype(int)),
         "emotion": father["emotion"],  # Optionally choose dominant emotion
     }
+
 
 def generate_prompt(desc: dict, gender: str) -> str:
     """Build the prompt for the AI image generation based on attributes."""
@@ -127,6 +143,7 @@ def generate_prompt(desc: dict, gender: str) -> str:
         f"and a facial expression resembling {desc['emotion']}. "
         f"Studio lighting, high resolution, realistic style."
     )
+
 
 def generate_child_image(prompt: str) -> str:
     """Generate image using OpenAI DALL-E model."""
