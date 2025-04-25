@@ -1,0 +1,140 @@
+import os
+import shutil
+import uuid
+from openai import OpenAI
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, UploadFile, Form
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import cv2
+import numpy as np
+import face_recognition
+from deepface import DeepFace
+
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key)
+
+app = FastAPI()
+
+class Baby(BaseModel):
+    gender: str
+
+@app.post("/generate-baby")
+async def generate_baby(
+    father_image: UploadFile = File(...),
+    mother_image: UploadFile = File(...),
+    gender: str = Form(...)
+):
+    try:
+        # Save images to temporary paths
+        father_path = save_image(father_image, "father")
+        mother_path = save_image(mother_image, "mother")
+
+        # Extract face features
+        father_desc = describe_face(father_path)
+        mother_desc = describe_face(mother_path)
+
+        # Merge attributes
+        combined_desc = combine_face_descriptions(father_desc, mother_desc)
+
+        # Generate prompt and image
+        prompt = generate_prompt(combined_desc, gender)
+        image_url = generate_child_image(prompt)
+
+        # Clean up
+        os.remove(father_path)
+        os.remove(mother_path)
+
+        return {"image_url": image_url}
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+def save_image(image: UploadFile, label: str) -> str:
+    """Save the uploaded image and compress it to reduce memory usage."""
+    path = f"temp_{uuid.uuid4().hex}_{label}.jpg"
+    with open(path, "wb") as f:
+        shutil.copyfileobj(image.file, f)
+    # Compress the image
+    compress_image(path)
+    return path
+
+def compress_image(image_path: str):
+    """Compress the image to reduce memory usage."""
+    image = cv2.imread(image_path)
+    if image is not None:
+        compressed = cv2.resize(image, (512, 512), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(image_path, compressed, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+def describe_face(image_path: str) -> dict:
+    """Extract features using DeepFace and color/landmark analysis."""
+    df = DeepFace.analyze(img_path=image_path, actions=['age', 'gender', 'race', 'emotion'], enforce_detection=True)[0]
+
+    image = cv2.imread(image_path)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    face_locations = face_recognition.face_locations(rgb)
+    if not face_locations:
+        raise ValueError("No face found in the image")
+
+    top, right, bottom, left = face_locations[0]
+    landmarks = face_recognition.face_landmarks(rgb)[0]
+
+    # Eye color extraction
+    eye_colors = []
+    for eye_key in ['left_eye', 'right_eye']:
+        eye = landmarks[eye_key]
+        mask = np.zeros_like(rgb)
+        cv2.fillPoly(mask, [np.array(eye)], (255, 255, 255))
+        masked = cv2.bitwise_and(rgb, mask)
+        pixels = masked[np.where((masked != [0, 0, 0]).all(axis=2))]
+        if len(pixels) > 0:
+            mean_color = np.mean(pixels, axis=0)
+            eye_colors.append(tuple(mean_color.astype(int)))
+
+    avg_eye_color = np.mean(eye_colors, axis=0).astype(int) if eye_colors else (0, 0, 0)
+
+    # Hair color estimation
+    hair_region = rgb[top:top + (bottom - top) // 4, left:right]
+    hair_color = np.mean(hair_region.reshape(-1, 3), axis=0).astype(int) if hair_region.size > 0 else (0, 0, 0)
+
+    return {
+        "age": df.get("age"),
+        "gender": df.get("dominant_gender"),
+        "race": df.get("dominant_race"),
+        "emotion": df.get("dominant_emotion"),
+        "eye_color_rgb": tuple(avg_eye_color),
+        "hair_color_rgb": tuple(hair_color),
+        "landmarks": landmarks
+    }
+
+def combine_face_descriptions(father: dict, mother: dict) -> dict:
+    """Average relevant attributes of both parents."""
+    return {
+        "race": mother["race"],  # Prefer mother's skin tone
+        "eye_color_rgb": tuple(((np.array(father["eye_color_rgb"]) + np.array(mother["eye_color_rgb"])) / 2).astype(int)),
+        "hair_color_rgb": tuple(((np.array(father["hair_color_rgb"]) + np.array(mother["hair_color_rgb"])) / 2).astype(int)),
+        "emotion": father["emotion"],  # Optionally choose dominant emotion
+    }
+
+def generate_prompt(desc: dict, gender: str) -> str:
+    """Build the prompt for the AI image generation based on attributes."""
+    return (
+        f"A photorealistic studio portrait of a {gender} child. "
+        f"The child has skin tone similar to the {desc['race']}, "
+        f"eyes approximately the color {desc['eye_color_rgb']}, "
+        f"hair color around {desc['hair_color_rgb']}, "
+        f"and a facial expression resembling {desc['emotion']}. "
+        f"Studio lighting, high resolution, realistic style."
+    )
+
+def generate_child_image(prompt: str) -> str:
+    """Generate image using OpenAI DALL-E model."""
+    response = client.images.generate(
+        model="dall-e-3",
+        prompt=prompt,
+        size="1024x1024",
+        quality="standard",
+        n=1
+    )
+    return response.data[0].url
