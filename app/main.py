@@ -1,9 +1,10 @@
 import os
 import shutil
 import uuid
+import aiofiles
 from pathlib import Path
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
@@ -13,15 +14,17 @@ import numpy as np
 import face_recognition
 import uvicorn
 from deepface import DeepFace
+from starlette.concurrency import run_in_threadpool
+
+
+app = FastAPI()
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+client = AsyncOpenAI(api_key=api_key)
+
 
 MEDIA_DIR = "media"
 os.makedirs(MEDIA_DIR, exist_ok=True)
-
-load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)
-
-app = FastAPI()
 
 
 class Baby(BaseModel):
@@ -41,19 +44,19 @@ async def generate_baby(
         user_dir.mkdir(parents=True, exist_ok=True)
 
         # Save images to temporary paths
-        father_path = save_uploaded_file(father_image, user_dir, "father")
-        mother_path = save_uploaded_file(mother_image, user_dir, "mother")
+        father_path = await save_uploaded_file(father_image, user_dir, "father")
+        mother_path = await save_uploaded_file(mother_image, user_dir, "mother")
 
         # Extract face features
-        father_desc = describe_face(father_path)
-        mother_desc = describe_face(mother_path)
+        father_desc = await describe_face(father_path)
+        mother_desc = await describe_face(mother_path)
 
         # Merge attributes
-        combined_desc = combine_face_descriptions(father_desc, mother_desc)
+        combined_desc = await combine_face_descriptions(father_desc, mother_desc)
 
         # Generate prompt and image
-        prompt = generate_prompt(combined_desc, gender)
-        image_url = generate_child_image(prompt)
+        prompt = await generate_prompt(combined_desc, gender)
+        image_url = await generate_child_image(prompt)
 
         # Clean up
         # os.remove(father_path)
@@ -65,25 +68,36 @@ async def generate_baby(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-def save_uploaded_file(upload_file: UploadFile, user_dir: Path, name: str) -> str:
+async def save_uploaded_file(upload_file: UploadFile, user_dir: Path, name: str) -> str:
     """Save uploaded file to a specific user's directory."""
     file_path = user_dir / f"{name}.jpg"
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(upload_file.file, buffer)
-    compress_image(str(file_path))
+    async with aiofiles.open(file_path, "wb") as buffer:
+        content = await upload_file.read()
+        await buffer.write(content)
+    await compress_image(str(file_path))
     return str(file_path)
 
 
-def compress_image(image_path: str) -> None:
+async def compress_image(image_path: str) -> None:
     """Compress the image to reduce memory usage."""
+    await run_in_threadpool(_compress_image_sync, image_path)
+
+
+def _compress_image_sync(image_path: str) -> None:
+    """Synchronous function to compress the image."""
     image = cv2.imread(image_path)
     if image is not None:
         compressed = cv2.resize(image, (512, 512), interpolation=cv2.INTER_AREA)
         cv2.imwrite(image_path, compressed, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
 
-def describe_face(image_path: str) -> dict:
+async def describe_face(image_path: str) -> dict:
     """Extract features using DeepFace and color/landmark analysis."""
+    return await run_in_threadpool(_describe_face_sync, image_path)
+
+
+def _describe_face_sync(image_path: str) -> dict:
+    """Synchronous function to describe the face."""
     df = DeepFace.analyze(img_path=image_path, actions=['age', 'gender', 'race', 'emotion'], enforce_detection=True)[0]
 
     image = cv2.imread(image_path)
@@ -124,7 +138,7 @@ def describe_face(image_path: str) -> dict:
     }
 
 
-def combine_face_descriptions(father: dict, mother: dict) -> dict:
+async def combine_face_descriptions(father: dict, mother: dict) -> dict:
     """Average relevant attributes of both parents."""
     return {
         "race": mother["race"],  # Prefer mother's skin tone
@@ -134,7 +148,7 @@ def combine_face_descriptions(father: dict, mother: dict) -> dict:
     }
 
 
-def generate_prompt(desc: dict, gender: str) -> str:
+async def generate_prompt(desc: dict, gender: str) -> str:
     """Build the prompt for the AI image generation based on attributes."""
     return (
         f"A photorealistic studio portrait of a {gender} child. "
@@ -146,9 +160,9 @@ def generate_prompt(desc: dict, gender: str) -> str:
     )
 
 
-def generate_child_image(prompt: str) -> str:
+async def generate_child_image(prompt: str) -> str:
     """Generate image using OpenAI DALL-E model."""
-    response = client.images.generate(
+    response = await client.images.generate(
         model="dall-e-3",
         prompt=prompt,
         size="1024x1024",
