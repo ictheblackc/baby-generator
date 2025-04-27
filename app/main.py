@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import cv2
 import numpy as np
 import face_recognition
+import uvicorn
 from deepface import DeepFace
 
 MEDIA_DIR = "media"
@@ -155,3 +156,7 @@ def generate_child_image(prompt: str) -> str:
         n=1
     )
     return response.data[0].url
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
