@@ -41,7 +41,7 @@ async def generate_baby(
 
         # Generate prompt and image
         prompt = await generate_prompt(combined_desc, gender)
-        image_url = await generate_child_image(client, prompt)
+        image_url = await generate_child_image(client, prompt, user_dir)
 
         # Clean up
         # os.remove(father_path)
